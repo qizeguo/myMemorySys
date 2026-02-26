@@ -13,6 +13,7 @@ from pathlib import Path
 import mlx.core as mx
 import psycopg2
 import psycopg2.extras
+import psycopg2.pool
 from fastapi import FastAPI, HTTPException
 from huggingface_hub import snapshot_download
 from pydantic import BaseModel, Field
@@ -96,7 +97,10 @@ def _load_model():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _load_model()
+    _init_pool()
     yield
+    if _pool:
+        _pool.closeall()
     logger.info("Shutting down")
 
 
@@ -126,6 +130,16 @@ class SaveRequest(BaseModel):
     category: str = "general"
     source: str = "claude_code"
     metadata: dict = Field(default_factory=dict)
+    expires_at: str | None = None  # ISO 格式时间戳，到期后搜索自动忽略
+
+
+class UpdateRequest(BaseModel):
+    content: str | None = None
+    summary: str | None = None
+    tags: list[str] | None = None
+    category: str | None = None
+    metadata: dict | None = None
+    expires_at: str | None = None
 
 
 class RebuildRequest(BaseModel):
@@ -133,10 +147,23 @@ class RebuildRequest(BaseModel):
 
 
 # ============================================================
-# 工具函数
+# 连接池
 # ============================================================
+_pool = None
+
+
+def _init_pool():
+    global _pool
+    _pool = psycopg2.pool.SimpleConnectionPool(minconn=1, maxconn=5, **DB_CONFIG)
+    logger.info("Database connection pool initialized")
+
+
 def get_db():
-    return psycopg2.connect(**DB_CONFIG)
+    return _pool.getconn()
+
+
+def put_db(conn):
+    _pool.putconn(conn)
 
 
 def embed_text(text: str | list[str], task_type: str = "retrieval.query") -> list[list[float]]:
@@ -158,7 +185,7 @@ def health():
     status = {"status": "ok", "model": MODEL_NAME}
     try:
         conn = get_db()
-        conn.close()
+        put_db(conn)
         status["database"] = "ok"
     except Exception:
         status["database"] = "unreachable"
@@ -196,6 +223,7 @@ def search(req: SearchRequest):
                 JOIN memories m ON m.id = me.memory_id
                 WHERE me.model_name = %s
                   AND (%s IS NULL OR m.category = %s)
+                  AND (m.expires_at IS NULL OR m.expires_at > NOW())
                   AND 1 - (me.embedding <=> %s::vector) >= %s
                 ORDER BY me.embedding <=> %s::vector
                 LIMIT %s
@@ -234,9 +262,21 @@ def search(req: SearchRequest):
             r["created_at"] = r["created_at"].isoformat()
 
         results.sort(key=lambda r: r["score"], reverse=True)
-        return results[: req.limit]
+        top = results[: req.limit]
+
+        # Fix #1: 搜索命中时更新 access_count
+        if top:
+            hit_ids = [r["id"] for r in top]
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE memories SET access_count = access_count + 1 WHERE id = ANY(%s)",
+                    (hit_ids,),
+                )
+            conn.commit()
+
+        return top
     finally:
-        conn.close()
+        put_db(conn)
 
 
 DEDUP_THRESHOLD = 0.92
@@ -302,11 +342,12 @@ def save(req: SaveRequest):
             # 无重复，正常插入
             cur.execute(
                 """
-                INSERT INTO memories (content, summary, tags, category, source, metadata)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                INSERT INTO memories (content, summary, tags, category, source, metadata, expires_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
                 """,
-                (req.content, req.summary, req.tags, req.category, req.source, json.dumps(req.metadata)),
+                (req.content, req.summary, req.tags, req.category, req.source,
+                 json.dumps(req.metadata), req.expires_at),
             )
             memory_id = cur.fetchone()["id"]
 
@@ -320,7 +361,106 @@ def save(req: SaveRequest):
             conn.commit()
             return {"status": "ok", "memory_id": memory_id}
     finally:
-        conn.close()
+        put_db(conn)
+
+
+@app.get("/memories")
+def list_memories(
+    category: str | None = None,
+    limit: int = 20,
+    offset: int = 0,
+    sort: str = "created_at",
+):
+    """列出记忆，支持按 category 筛选和分页"""
+    allowed_sorts = {"created_at", "updated_at", "access_count"}
+    if sort not in allowed_sorts:
+        sort = "created_at"
+
+    conn = get_db()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                f"""
+                SELECT id, summary, tags, category, access_count, created_at, updated_at
+                FROM memories
+                WHERE (%s IS NULL OR category = %s)
+                ORDER BY {sort} DESC
+                LIMIT %s OFFSET %s
+                """,
+                (category, category, limit, offset),
+            )
+            rows = cur.fetchall()
+
+            cur.execute(
+                "SELECT COUNT(*) FROM memories WHERE (%s IS NULL OR category = %s)",
+                (category, category),
+            )
+            total = cur.fetchone()["count"]
+
+        for r in rows:
+            r["created_at"] = r["created_at"].isoformat()
+            r["updated_at"] = r["updated_at"].isoformat()
+
+        return {"total": total, "limit": limit, "offset": offset, "memories": rows}
+    finally:
+        put_db(conn)
+
+
+@app.put("/memory/{memory_id}")
+def update_memory(memory_id: int, req: UpdateRequest):
+    """更新记忆内容，自动重建 embedding"""
+    conn = get_db()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            # 先获取现有记录
+            cur.execute(
+                "SELECT content, summary, tags, category, metadata, expires_at FROM memories WHERE id = %s",
+                (memory_id,),
+            )
+            existing = cur.fetchone()
+            if not existing:
+                raise HTTPException(status_code=404, detail="Memory not found")
+
+            # 合并更新字段
+            new_content = req.content if req.content is not None else existing["content"]
+            new_summary = req.summary if req.summary is not None else existing["summary"]
+            new_tags = req.tags if req.tags is not None else existing["tags"]
+            new_category = req.category if req.category is not None else existing["category"]
+            new_metadata = req.metadata if req.metadata is not None else existing["metadata"]
+            new_expires = req.expires_at if req.expires_at is not None else existing.get("expires_at")
+
+            cur.execute(
+                """
+                UPDATE memories
+                SET content = %s, summary = %s, tags = %s, category = %s,
+                    metadata = %s, expires_at = %s, updated_at = NOW()
+                WHERE id = %s
+                """,
+                (new_content, new_summary, new_tags, new_category,
+                 json.dumps(new_metadata), new_expires, memory_id),
+            )
+
+            # 重建 embedding
+            embed_input = build_embed_input(new_content, new_summary, new_tags)
+            vecs = embed_text(embed_input, "retrieval.passage")
+            vec_str = vec_to_str(vecs[0])
+
+            cur.execute(
+                "DELETE FROM memory_embeddings WHERE memory_id = %s AND model_name = %s",
+                (memory_id, MODEL_NAME),
+            )
+            cur.execute(
+                """
+                INSERT INTO memory_embeddings (memory_id, model_name, embedding)
+                VALUES (%s, %s, %s::vector)
+                """,
+                (memory_id, MODEL_NAME, vec_str),
+            )
+            conn.commit()
+
+        return {"status": "ok", "memory_id": memory_id}
+    finally:
+        put_db(conn)
 
 
 @app.post("/rebuild")
@@ -363,7 +503,7 @@ def rebuild(req: RebuildRequest):
 
         return {"status": "ok", "total_rebuilt": total, "model": MODEL_NAME}
     finally:
-        conn.close()
+        put_db(conn)
 
 
 @app.get("/memory/{memory_id}")
@@ -373,7 +513,7 @@ def get_memory(memory_id: int):
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
-                "SELECT id, content, summary, tags, category, metadata, access_count, created_at, updated_at FROM memories WHERE id = %s",
+                "SELECT id, content, summary, tags, category, metadata, access_count, expires_at, created_at, updated_at FROM memories WHERE id = %s",
                 (memory_id,),
             )
             row = cur.fetchone()
@@ -381,9 +521,11 @@ def get_memory(memory_id: int):
                 raise HTTPException(status_code=404, detail="Memory not found")
             row["created_at"] = row["created_at"].isoformat()
             row["updated_at"] = row["updated_at"].isoformat()
+            if row.get("expires_at"):
+                row["expires_at"] = row["expires_at"].isoformat()
             return row
     finally:
-        conn.close()
+        put_db(conn)
 
 
 @app.delete("/memory/{memory_id}")
@@ -399,4 +541,4 @@ def delete_memory(memory_id: int):
             conn.commit()
             return {"status": "ok", "deleted_id": memory_id}
     finally:
-        conn.close()
+        put_db(conn)

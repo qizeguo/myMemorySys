@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS memories (
     source TEXT DEFAULT 'claude_code',
     metadata JSONB DEFAULT '{}',
     access_count INT DEFAULT 1,
+    expires_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );

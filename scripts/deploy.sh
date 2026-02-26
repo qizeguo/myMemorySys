@@ -10,8 +10,10 @@
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-HOOK_SRC="$PROJECT_DIR/hooks/on_prompt_submit.sh"
-HOOK_DST="$HOME/.claude/memory/hooks/on_prompt_submit.sh"
+HOOK_PROMPT_SRC="$PROJECT_DIR/hooks/on_prompt_submit.sh"
+HOOK_PROMPT_DST="$HOME/.claude/memory/hooks/on_prompt_submit.sh"
+HOOK_COMPACT_SRC="$PROJECT_DIR/hooks/on_pre_compact.sh"
+HOOK_COMPACT_DST="$HOME/.claude/memory/hooks/on_pre_compact.sh"
 SETTINGS="$HOME/.claude/settings.json"
 CONTAINER_NAME="memory-postgres"
 
@@ -73,11 +75,14 @@ print(f'  → Model cached at: {path}')
 "
 
 # ── 5. 部署 hook 脚本 ──
-echo "[5/6] Deploying Claude Code hook..."
-mkdir -p "$(dirname "$HOOK_DST")"
-cp "$HOOK_SRC" "$HOOK_DST"
-chmod +x "$HOOK_DST"
-echo "  → Hook deployed: $HOOK_DST"
+echo "[5/6] Deploying Claude Code hooks..."
+mkdir -p "$(dirname "$HOOK_PROMPT_DST")"
+cp "$HOOK_PROMPT_SRC" "$HOOK_PROMPT_DST"
+chmod +x "$HOOK_PROMPT_DST"
+echo "  → Hook deployed: $HOOK_PROMPT_DST"
+cp "$HOOK_COMPACT_SRC" "$HOOK_COMPACT_DST"
+chmod +x "$HOOK_COMPACT_DST"
+echo "  → Hook deployed: $HOOK_COMPACT_DST"
 
 # ── 6. 注册 hook 到 settings.json ──
 echo "[6/6] Registering hook in settings.json..."
@@ -94,6 +99,18 @@ HOOK_ENTRY='{
           }
         ]
       }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "'"$HOME"'/.claude/memory/hooks/on_pre_compact.sh",
+            "timeout": 5,
+            "statusMessage": "清理记忆缓存..."
+          }
+        ]
+      }
     ]
   }
 }'
@@ -101,7 +118,7 @@ HOOK_ENTRY='{
 if [ ! -f "$SETTINGS" ]; then
     echo "$HOOK_ENTRY" > "$SETTINGS"
     echo "  → Created $SETTINGS"
-elif ! grep -q "on_prompt_submit.sh" "$SETTINGS"; then
+elif ! grep -q "on_prompt_submit.sh" "$SETTINGS" || ! grep -q "on_pre_compact.sh" "$SETTINGS"; then
     echo "  ⚠  $SETTINGS 已存在，请手动合并以下 hook 配置："
     echo "$HOOK_ENTRY"
 else

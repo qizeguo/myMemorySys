@@ -1,6 +1,6 @@
 # Claude Code 长期记忆系统
 
-为 Claude Code 提供跨会话的语义记忆能力。每次对话自动检索相关历史记忆并注入上下文，也支持手动保存和管理记忆。
+为 Claude Code 提供跨会话的语义记忆能力。自动检索相关历史记忆并增量注入上下文，支持实时保存和管理记忆。
 
 ## 架构
 
@@ -9,10 +9,12 @@ Mac 宿主机                                  OrbStack
 ┌────────────────────────────────┐         ┌──────────────────┐
 │  FastAPI 服务 (port 9776)      │         │ PostgreSQL       │
 │    MLX embedding (Jina v5 8bit)│───DB───→│  + pgvector      │
-│    记忆搜索 / 保存 / 管理       │         │  port 5432       │
-│                                │         └──────────────────┘
-│  Claude Code Hook              │
-│    每次 prompt → 自动搜索记忆   │
+│    连接池 (1-5 connections)     │         │  port 5432       │
+│    记忆搜索 / 保存 / 更新 / 管理 │         └──────────────────┘
+│                                │
+│  Claude Code Hooks             │
+│    UserPromptSubmit → 增量搜索  │
+│    PreCompact → 清缓存+提醒保存 │
 └────────────────────────────────┘
 ```
 
@@ -22,13 +24,18 @@ Mac 宿主机                                  OrbStack
 
 ## 核心特性
 
+- **增量注入**：5 轮保护期内不重复注入同一记忆，过期自动清理从缓存驱逐，再次命中视为全新注入。首轮/压缩后最多 10 条，后续最多 5 条
+- **话题切换检测**：搜索结果中 >50% 为新记忆时，自动提醒 Claude 保存上一段对话的经验
+- **PreCompact hook**：上下文压缩前清空注入缓存，压缩后自动全量重注入
+- **实时保存优先**：引导 Claude 边做边存（决策、踩坑、偏好），不依赖会话结束时的一次性总结
 - **Summary 注入**：搜索结果仅注入 summary 摘要（而非全文），节省 token，Claude 需要细节时按 id 获取全文
 - **复合 Embedding**：保存时将 `tags + summary + content` 拼接后生成单一向量，关键词前置提升检索召回率
 - **多因子评分排序**：`score = similarity × 0.65 + category × 0.20 + recency × 0.10 + importance × 0.05`，每个 category 有独立时间衰减半衰期
+- **搜索命中更新 access_count**：被检索到的记忆自动提升重要性权重
 - **自动去重**：保存时检测 similarity > 0.92 的已有记忆，更新 access_count 而非重复创建
+- **记忆过期**：支持 `expires_at` 字段，临时记忆到期后搜索自动忽略
 - **10 种记忆类别**：identity / preference / decision / architecture / project / research / code / bug / conversation / general，按重要性差异化权重和衰减速度
-- **会话结束总结**：Hook 注入指令引导 Claude 在会话结束时提炼经验保存，并清理过时记忆
-- **双向 Hook**：自动检测 "记住/remember" 关键词保存 + 自动搜索相关记忆注入
+- **连接池**：SimpleConnectionPool(1-5) 管理数据库连接，避免频繁建连
 
 ## 前置要求
 
@@ -53,8 +60,8 @@ git clone <repo-url> && cd memorySyS
 2. 初始化数据库表结构和索引
 3. 通过 uv 安装 Python 依赖
 4. 预下载 MLX 模型到 HuggingFace 缓存（首次约 600MB）
-5. 部署 hook 脚本到 `~/.claude/memory/hooks/`
-6. 注册 hook 到 `~/.claude/settings.json`
+5. 部署 hook 脚本到 `~/.claude/memory/hooks/`（UserPromptSubmit + PreCompact）
+6. 注册 hooks 到 `~/.claude/settings.json`
 
 ### 手动部署
 
@@ -71,9 +78,11 @@ psql -h localhost -U postgres -d memory -f sql/init.sql
 # 3. 安装依赖
 uv sync
 
-# 4. 部署 hook
-cp hooks/on_prompt_submit.sh ~/.claude/memory/hooks/on_prompt_submit.sh
-chmod +x ~/.claude/memory/hooks/on_prompt_submit.sh
+# 4. 部署 hooks
+mkdir -p ~/.claude/memory/hooks
+cp hooks/on_prompt_submit.sh ~/.claude/memory/hooks/
+cp hooks/on_pre_compact.sh ~/.claude/memory/hooks/
+chmod +x ~/.claude/memory/hooks/*.sh
 ```
 
 然后在 `~/.claude/settings.json` 中添加：
@@ -89,6 +98,18 @@ chmod +x ~/.claude/memory/hooks/on_prompt_submit.sh
             "command": "$HOME/.claude/memory/hooks/on_prompt_submit.sh",
             "timeout": 15,
             "statusMessage": "搜索相关记忆..."
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.claude/memory/hooks/on_pre_compact.sh",
+            "timeout": 5,
+            "statusMessage": "清理记忆缓存..."
           }
         ]
       }
@@ -113,34 +134,56 @@ curl http://localhost:9776/health
 
 ## 使用方式
 
-### 自动检索（被动）
+### 自动检索（增量注入）
 
-正常使用 Claude Code 即可。每次提交 prompt，hook 自动搜索相关记忆，以 summary 形式注入上下文：
+正常使用 Claude Code 即可。hook 自动搜索相关记忆并增量注入：
 
 ```
 你: 帮我看看那个 Rust 重写的项目进度
-    ↓ hook 注入 summary
-    Top 2 memories relevant:
+    ↓ hook 搜索 → 首轮最多 10 条，后续最多 5 条（已注入的跳过）
+    3 memories (turn 1, summary only):
     - [id:42] [project] [score:0.72] 后端技术栈迁移到 Rust，预计 Q2 完成
     - [id:18] [decision] [score:0.65] 选择 Rust 是因为性能需求和团队经验
+    - [id:31] [architecture] [score:0.61] Rust 后端使用 Axum 框架
 Claude: 根据之前的计划，你们 Q2 要完成 Rust 后端重写...
+
+你: 那认证模块的方案呢    ← 同一话题
+    ↓ hook 搜索 → id:42, id:18 在保护期内跳过
+    1 memories (turn 2):
+    - [id:55] [architecture] [score:0.68] 认证方案选用 JWT + OAuth2
 ```
 
-Claude 需要更多细节时，会自动调用 `GET /memory/{id}` 获取全文。
+### 话题切换提醒
 
-### 手动保存（主动）
-
-在对话中告诉 Claude "记住xxx"，hook 自动检测并保存：
+当搜索结果中超过一半是新记忆（话题明显转变）时，hook 自动提醒：
 
 ```
-你: 记住，我们团队从今天开始用 Linear 替代 Jira
-    ↓ hook 自动检测保存意图 → 调用 /save
-Claude: 好的，已保存。
+你: 我们来看看论文的实验部分    ← 话题从 Rust 项目切换到论文
+    ↓ hook 检测到 3/4 条新记忆 > 50%
+    <memory-save-reminder>
+    检测到话题切换。前一段对话中是否有值得长期保存的经验？
+    </memory-save-reminder>
 ```
 
-### 会话结束总结
+### 上下文压缩保护
 
-当用户表示结束或任务完成时，Claude 会自动回顾会话，提炼有价值的经验逐条保存（附 tags 和 summary），无有价值内容则不保存。
+当 Claude Code 压缩上下文时，PreCompact hook 自动清空注入缓存：
+
+```
+[上下文即将压缩]
+    ↓ PreCompact hook → 清空缓存 + 提醒保存
+压缩完成后，下一轮 prompt 自动全量重注入（最多 10 条）
+```
+
+### 实时保存
+
+Claude 在对话中发现重要信息时会主动保存，不需要等会话结束：
+
+```
+Claude: 这个 bug 是因为 timezone 不一致导致的，已修复。
+        我来保存这个踩坑经验...
+        [调用 /save: category=bug, tags=["timezone","PostgreSQL","UTC"]]
+```
 
 ### 过时记忆清理
 
@@ -154,13 +197,26 @@ curl -s http://localhost:9776/save \
     -H "Content-Type: application/json" \
     -d '{"content": "项目决定使用 Rust 重写后端", "tags": ["rust","后端","架构决策"], "category": "decision", "summary": "后端技术栈迁移到 Rust"}'
 
-# 搜索记忆（多因子评分排序）
+# 保存带过期时间的临时记忆
+curl -s http://localhost:9776/save \
+    -H "Content-Type: application/json" \
+    -d '{"content": "下周三和导师开会讨论论文", "category": "conversation", "summary": "下周三导师会议", "expires_at": "2026-03-05T00:00:00Z"}'
+
+# 搜索记忆（多因子评分排序，自动过滤过期记忆）
 curl -s http://localhost:9776/search \
     -H "Content-Type: application/json" \
     -d '{"query": "Rust 重写", "limit": 5}' | jq .
 
+# 列出记忆（支持 category 筛选、分页、排序）
+curl -s "http://localhost:9776/memories?category=project&limit=10&sort=access_count" | jq .
+
 # 获取单条记忆全文
 curl -s http://localhost:9776/memory/42 | jq .
+
+# 更新记忆（部分更新，自动重建 embedding）
+curl -s -X PUT http://localhost:9776/memory/42 \
+    -H "Content-Type: application/json" \
+    -d '{"summary": "后端技术栈已迁移到 Rust，Q2 完成", "tags": ["rust","后端","已完成"]}' | jq .
 
 # 删除记忆
 curl -s -X DELETE http://localhost:9776/memory/42
@@ -177,7 +233,7 @@ final_score = similarity × 0.65 + category_weight × 0.20 + recency × 0.10 + i
 | similarity | cosine similarity (0-1) | 向量语义相似度，由 `tags + summary + content` 复合 embedding 计算 |
 | category_weight | 按类别 0-1 归一化 | identity=1.0, preference/decision=0.9, conversation=0.3 |
 | recency | `exp(-age_days / half_life)` | 每个 category 有独立半衰期，identity ~10年，conversation 30天 |
-| importance | `min(1, log(1+access_count) / log(11))` | 被多次触及的记忆更重要，access_count=10 时饱和 |
+| importance | `min(1, log(1+access_count) / log(11))` | 搜索命中自动 +1，access_count=10 时饱和 |
 
 ## Memory Categories
 
@@ -194,17 +250,39 @@ final_score = similarity × 0.65 + category_weight × 0.20 + recency × 0.10 + i
 | conversation | 0.3 | 30 天 | 临时对话上下文（快速衰减） |
 | general | 0.5 | 60 天 | 其他 |
 
+## 注入策略
+
+### 增量注入（5 轮保护期）
+
+```
+命中记忆 → 注入 → 5 轮保护期（不重复注入） → 缓存驱逐 → 再次命中则重新注入
+```
+
+- 首轮 / 压缩后：缓存为空，最多搜索 10 条
+- 后续轮次：缓存非空，最多搜索 5 条，已在保护期内的记忆跳过
+- 缓存存储在 `/tmp/claude-memory-cache/`，会话结束自动清理
+
+### 话题切换检测
+
+搜索结果中超过 50% 为新记忆（不在缓存中）且轮次 > 3 时，注入 `<memory-save-reminder>` 提醒 Claude 保存前一段对话的经验。
+
+### PreCompact 缓存清理
+
+上下文压缩前清空注入缓存，确保压缩后第一轮 prompt 触发全量重注入。同时提醒 Claude 先保存未存的经验。
+
 ## API 接口
 
 | 方法 | 路径 | 说明 | 请求体示例 |
 |------|------|------|-----------|
 | GET | `/health` | 健康检查 | — |
 | POST | `/embed` | 生成 embedding | `{"text": "...", "task_type": "retrieval.query"}` |
-| POST | `/search` | 搜索记忆（多因子评分） | `{"query": "...", "limit": 5, "min_similarity": 0.5}` |
-| POST | `/save` | 保存记忆（复合 embedding + 自动去重） | `{"content": "...", "tags": ["kw1","kw2"], "category": "decision", "summary": "..."}` |
-| POST | `/rebuild` | 重建所有向量（复合 embedding） | `{"batch_size": 64}` |
+| POST | `/search` | 搜索记忆（多因子评分 + 过期过滤） | `{"query": "...", "limit": 5, "min_similarity": 0.5}` |
+| POST | `/save` | 保存记忆（复合 embedding + 自动去重） | `{"content": "...", "tags": [...], "category": "...", "summary": "...", "expires_at": "..."}` |
+| GET | `/memories` | 列出记忆（筛选 + 分页 + 排序） | query params: `category`, `limit`, `offset`, `sort` |
+| PUT | `/memory/{id}` | 更新记忆（部分更新 + 重建 embedding） | `{"content": "...", "summary": "...", "tags": [...]}` |
 | GET | `/memory/{id}` | 获取单条记忆全文 | — |
 | DELETE | `/memory/{id}` | 删除记忆 | — |
+| POST | `/rebuild` | 重建所有向量（复合 embedding） | `{"batch_size": 64}` |
 
 ## 环境变量
 
