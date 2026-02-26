@@ -86,6 +86,10 @@ def _load_model():
 
     jina_model = jina_module.JinaEmbeddingModel(config)
     weights = mx.load(str(model_dir / WEIGHTS_FILE))
+    # 8bit 量化权重含 scales/biases，需先将 Linear 替换为 QuantizedLinear
+    if any("scales" in k for k in weights.keys()):
+        import mlx.nn as nn
+        nn.quantize(jina_model, bits=8)
     jina_model.load_weights(list(weights.items()))
     mx.eval(jina_model.parameters())
 

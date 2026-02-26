@@ -22,15 +22,20 @@ echo "Project: $PROJECT_DIR"
 echo ""
 
 # ── 1. 检查/启动 PostgreSQL ──
+PG_PORT="${DB_PORT:-5432}"
 echo "[1/6] Checking PostgreSQL..."
 if docker inspect -f '{{.State.Running}}' "$CONTAINER_NAME" 2>/dev/null | grep -q true; then
     echo "  → Container '$CONTAINER_NAME' already running, skipping"
+elif lsof -i :"$PG_PORT" -sTCP:LISTEN > /dev/null 2>&1; then
+    echo "  → Port $PG_PORT already in use (existing PostgreSQL), skipping container creation"
 elif docker inspect -f '{{.State.Status}}' "$CONTAINER_NAME" 2>/dev/null | grep -q exited; then
     echo "  → Container '$CONTAINER_NAME' exists but stopped, starting..."
     docker start "$CONTAINER_NAME"
     echo "  → Started"
 else
-    echo "  → Container '$CONTAINER_NAME' not found, creating via docker-compose..."
+    # 清理可能残留的失败容器
+    docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
+    echo "  → Creating PostgreSQL via docker-compose..."
     cd "$PROJECT_DIR"
     docker compose up -d
     echo "  → Waiting for PostgreSQL to be ready..."
@@ -50,14 +55,25 @@ DB_PORT="${DB_PORT:-5432}"
 DB_NAME="${DB_NAME:-memory}"
 DB_USER="${DB_USER:-postgres}"
 
-# 创建数据库（如果不存在）— docker-compose 已通过 POSTGRES_DB 创建，
-# 但手动部署时可能需要
-psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -tc \
-    "SELECT 1 FROM pg_database WHERE datname = '$DB_NAME'" \
-    | grep -q 1 \
-    || psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -c "CREATE DATABASE $DB_NAME;"
+# 优先用宿主机 psql，否则找运行中的 PG 容器通过 docker exec 执行
+if command -v psql > /dev/null 2>&1; then
+    PSQL_CMD="psql -h $DB_HOST -p $DB_PORT -U $DB_USER"
+else
+    # 找到监听 5432 的 PostgreSQL 容器
+    PG_CONTAINER=$(docker ps --format '{{.Names}}' --filter "publish=$PG_PORT" | head -1)
+    if [ -z "$PG_CONTAINER" ]; then
+        PG_CONTAINER="$CONTAINER_NAME"
+    fi
+    echo "  → Using psql via container '$PG_CONTAINER'"
+    PSQL_CMD="docker exec -i $PG_CONTAINER psql -U $DB_USER"
+fi
 
-psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -f "$PROJECT_DIR/sql/init.sql"
+# 创建数据库（如果不存在）
+$PSQL_CMD -tc "SELECT 1 FROM pg_database WHERE datname = '$DB_NAME'" \
+    | grep -q 1 \
+    || $PSQL_CMD -c "CREATE DATABASE $DB_NAME;"
+
+$PSQL_CMD -d "$DB_NAME" < "$PROJECT_DIR/sql/init.sql"
 echo "  → Database initialized"
 
 # ── 3. 安装 Python 依赖 ──
