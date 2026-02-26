@@ -85,7 +85,7 @@ cp hooks/on_pre_compact.sh ~/.claude/memory/hooks/
 chmod +x ~/.claude/memory/hooks/*.sh
 ```
 
-然后在 `~/.claude/settings.json` 中添加：
+然后在 `~/.claude/settings.json` 中合并以下 `hooks` 配置（如果文件已存在其他配置，只需添加 `hooks` 字段）：
 
 ```json
 {
@@ -117,6 +117,8 @@ chmod +x ~/.claude/memory/hooks/*.sh
   }
 }
 ```
+
+> **注意**：`deploy.sh` 会尝试自动注册 hooks，但如果 `~/.claude/settings.json` 已存在，需要手动合并上述配置以避免覆盖已有设置。
 
 ## 启动服务
 
