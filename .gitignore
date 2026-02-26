@@ -4,3 +4,12 @@ __pycache__/
 logs/
 .env
 /uv.lock
+
+# Runtime files
+.service.pid
+service.log
+
+# Claude Code local config
+.claude/
+.agents/
+skills-lock.json
