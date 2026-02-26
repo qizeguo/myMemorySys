@@ -121,10 +121,17 @@ chmod +x ~/.claude/memory/hooks/*.sh
 ## 启动服务
 
 ```bash
+# 推荐：使用 service.sh 管理（后台运行）
+./scripts/service.sh start    # 启动（自动等待模型加载完成）
+./scripts/service.sh stop     # 停止
+./scripts/service.sh restart  # 重启
+./scripts/service.sh status   # 查看状态 + 健康检查
+
+# 或手动前台运行（调试用）
 uv run uvicorn app:app --host 0.0.0.0 --port 9776
 ```
 
-首次启动会加载模型到内存（约 10-30 秒），之后每次请求直接推理。
+首次启动会加载模型到内存（约 10-30 秒），之后每次请求直接推理。日志输出到项目目录下 `service.log`。
 
 验证：
 
@@ -133,6 +140,22 @@ curl http://localhost:9776/health
 ```
 
 ## 使用方式
+
+### 查看记忆
+
+```bash
+# 列出所有记忆（支持分页）
+curl -s "http://localhost:9776/memories?limit=20" | jq .
+
+# 按类别筛选
+curl -s "http://localhost:9776/memories?category=decision" | jq .
+
+# 按访问次数排序
+curl -s "http://localhost:9776/memories?sort=access_count&limit=10" | jq .
+
+# 查看单条记忆全文
+curl -s http://localhost:9776/memory/{id} | jq .
+```
 
 ### 自动检索（增量注入）
 
