@@ -1,7 +1,7 @@
 services:
   postgres:
     image: pgvector/pgvector:pg18
-    container_name: memory-postgres
+    container_name: pg18
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${DB_USER:-postgres}

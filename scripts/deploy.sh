@@ -15,7 +15,7 @@ HOOK_PROMPT_DST="$HOME/.claude/memory/hooks/on_prompt_submit.sh"
 HOOK_COMPACT_SRC="$PROJECT_DIR/hooks/on_pre_compact.sh"
 HOOK_COMPACT_DST="$HOME/.claude/memory/hooks/on_pre_compact.sh"
 SETTINGS="$HOME/.claude/settings.json"
-CONTAINER_NAME="memory-postgres"
+CONTAINER_NAME="pg18"
 
 echo "=== Claude Code Memory System Deploy ==="
 echo "Project: $PROJECT_DIR"
@@ -86,8 +86,21 @@ echo "  → Dependencies installed"
 echo "[4/6] Pre-downloading MLX model (first time may take a few minutes)..."
 uv run python -c "
 from huggingface_hub import snapshot_download
-path = snapshot_download('jinaai/jina-embeddings-v5-text-small-retrieval-mlx')
-print(f'  → Model cached at: {path}')
+from pathlib import Path
+try:
+    path = snapshot_download('jinaai/jina-embeddings-v5-text-small-retrieval-mlx', local_files_only=True)
+    print(f'  → Model already cached at: {path}')
+except Exception:
+    path = snapshot_download('jinaai/jina-embeddings-v5-text-small-retrieval-mlx')
+    print(f'  → Model downloaded to: {path}')
+weights_8bit = Path(path) / 'model-8bit.safetensors'
+weights_fp = Path(path) / 'model.safetensors'
+if weights_8bit.exists():
+    print('  → 8bit quantized weights available')
+elif weights_fp.exists():
+    print('  → Full-precision weights available (will quantize to 8bit at runtime)')
+else:
+    raise RuntimeError('No model weights found!')
 "
 
 # ── 5. 部署 hook 脚本 ──

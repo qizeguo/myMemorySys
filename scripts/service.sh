@@ -22,6 +22,26 @@ start_service() {
 
     echo "启动记忆服务 (port $PORT)..."
     cd "$PROJECT_DIR"
+
+    # 确保 OrbStack 和 PostgreSQL 容器运行
+    if ! docker info > /dev/null 2>&1; then
+        echo "启动 OrbStack..."
+        open -a OrbStack
+        for i in $(seq 1 30); do
+            docker info > /dev/null 2>&1 && break
+            sleep 1
+        done
+        if ! docker info > /dev/null 2>&1; then
+            echo "错误: OrbStack 启动超时"
+            exit 1
+        fi
+    fi
+    if ! docker ps --filter name=pg18 --filter status=running -q | grep -q .; then
+        echo "启动 PostgreSQL 容器 (pg18)..."
+        docker start pg18
+        sleep 2
+    fi
+
     # 确保项目 .venv 存在
     if [ ! -d "$PROJECT_DIR/.venv" ]; then
         echo "初始化虚拟环境..."

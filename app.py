@@ -72,7 +72,10 @@ def _load_model():
     """下载并加载 MLX 模型"""
     global _model, _tokenizer
 
-    model_dir = Path(snapshot_download(MODEL_REPO))
+    try:
+        model_dir = Path(snapshot_download(MODEL_REPO, local_files_only=True))
+    except Exception:
+        model_dir = Path(snapshot_download(MODEL_REPO))
     logger.info(f"Model directory: {model_dir}")
 
     # 动态导入 HF 仓库中的 model.py
@@ -85,12 +88,21 @@ def _load_model():
         config = json.load(f)
 
     jina_model = jina_module.JinaEmbeddingModel(config)
-    weights = mx.load(str(model_dir / WEIGHTS_FILE))
-    # 8bit 量化权重含 scales/biases，需先将 Linear 替换为 QuantizedLinear
-    if any("scales" in k for k in weights.keys()):
-        import mlx.nn as nn
+    import mlx.nn as nn
+    weights_path = model_dir / WEIGHTS_FILE
+    if weights_path.exists():
+        # 预量化 8bit 权重
+        weights = mx.load(str(weights_path))
+        if any("scales" in k for k in weights.keys()):
+            nn.quantize(jina_model, bits=8)
+        jina_model.load_weights(list(weights.items()))
+        logger.info("Loaded 8bit quantized weights")
+    else:
+        # 全精度权重，运行时量化为 8bit
+        weights = mx.load(str(model_dir / "model.safetensors"))
+        jina_model.load_weights(list(weights.items()))
         nn.quantize(jina_model, bits=8)
-    jina_model.load_weights(list(weights.items()))
+        logger.info("Loaded full-precision weights, quantized to 8bit at runtime")
     mx.eval(jina_model.parameters())
 
     _model = jina_model

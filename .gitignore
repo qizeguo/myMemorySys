@@ -13,3 +13,6 @@ service.log
 .claude/
 .agents/
 skills-lock.json
+
+# Generated artifacts
+*.alfredworkflow
