@@ -42,11 +42,14 @@ Mac 宿主机                                  OrbStack
 
 ## 前置要求
 
-- macOS + Apple Silicon（MLX 依赖）
-- [uv](https://docs.astral.sh/uv/)（Python 包管理）
-- PostgreSQL + [pgvector](https://github.com/pgvector/pgvector) 扩展（已有或通过 docker-compose 部署）
-- [Claude Code](https://docs.anthropic.com/en/docs/claude-code)
+- macOS + Apple Silicon（MLX 框架依赖 Apple Silicon）
+- [OrbStack](https://orbstack.dev/)（轻量 Docker 运行环境，用于运行 PostgreSQL 容器）
+- [uv](https://docs.astral.sh/uv/)（Python 包管理，安装：`curl -LsSf https://astral.sh/uv/install.sh | sh`）
+- [Claude Code](https://docs.anthropic.com/en/docs/claude-code)（安装：`npm install -g @anthropic-ai/claude-code`）
+- Bash 4+（macOS 自带 3.2 不支持关联数组，需通过 Homebrew 安装：`brew install bash`）
 - curl + jq（macOS 自带）
+
+> **注意**：PostgreSQL + pgvector 无需手动安装，部署脚本会通过 OrbStack 自动创建容器。
 
 ## 部署
 
