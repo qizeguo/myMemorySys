@@ -256,6 +256,14 @@ curl -s -X DELETE http://localhost:9776/memory/42
 curl -s -X POST http://localhost:9776/memory/42/suppress \
     -H "Content-Type: application/json" \
     -d '{"session_id": "your-session-id", "turns": 20}'
+
+# 清理过期记忆（先预览，确认后再删除）
+curl -s http://localhost:9776/cleanup \
+    -H "Content-Type: application/json" \
+    -d '{"dry_run": true}' | jq .          # 预览
+curl -s http://localhost:9776/cleanup \
+    -H "Content-Type: application/json" \
+    -d '{"dry_run": false}' | jq .         # 实际删除
 ```
 
 ## 搜索评分公式
@@ -319,6 +327,7 @@ final_score = similarity × 0.65 + category_weight × 0.20 + recency × 0.10 + i
 | GET | `/memory/{id}` | 获取单条记忆全文 | — |
 | DELETE | `/memory/{id}` | 删除记忆 | — |
 | POST | `/memory/{id}/suppress` | 按 session 抑制记忆 | `{"session_id": "...", "turns": 20}` |
+| POST | `/cleanup` | 清理过期记忆（默认 60 天未访问） | `{"stale_days": 60, "exempt_categories": ["identity"], "dry_run": true}` |
 | POST | `/rebuild` | 重建所有向量（复合 embedding） | `{"batch_size": 64}` |
 
 ## 环境变量

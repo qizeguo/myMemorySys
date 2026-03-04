@@ -307,7 +307,7 @@ def search(req: SearchRequest):
             hit_ids = [r["id"] for r in top]
             with conn.cursor() as cur:
                 cur.execute(
-                    "UPDATE memories SET access_count = access_count + 1 WHERE id = ANY(%s)",
+                    "UPDATE memories SET access_count = access_count + 1, last_accessed_at = NOW() WHERE id = ANY(%s)",
                     (hit_ids,),
                 )
             conn.commit()
@@ -592,5 +592,50 @@ def delete_memory(memory_id: int):
                 raise HTTPException(status_code=404, detail="Memory not found")
             conn.commit()
             return {"status": "ok", "deleted_id": memory_id}
+    finally:
+        put_db(conn)
+
+
+class CleanupRequest(BaseModel):
+    stale_days: int = 60  # 多少天未访问视为过期，默认 60 天
+    exempt_categories: list[str] = Field(default_factory=lambda: ["identity"])
+    dry_run: bool = True  # 默认仅预览，不实际删除
+
+
+@app.post("/cleanup")
+def cleanup(req: CleanupRequest):
+    """清理长期未被访问的过期记忆（identity 类别默认豁免）"""
+    conn = get_db()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id, summary, category, access_count, last_accessed_at
+                FROM memories
+                WHERE last_accessed_at < NOW() - INTERVAL '%s days'
+                  AND category != ALL(%s)
+                ORDER BY last_accessed_at ASC
+                """,
+                (req.stale_days, req.exempt_categories),
+            )
+            stale = cur.fetchall()
+
+            for r in stale:
+                if r.get("last_accessed_at"):
+                    r["last_accessed_at"] = r["last_accessed_at"].isoformat()
+
+            if not req.dry_run and stale:
+                stale_ids = [r["id"] for r in stale]
+                cur.execute(
+                    "DELETE FROM memories WHERE id = ANY(%s)",
+                    (stale_ids,),
+                )
+                conn.commit()
+
+            return {
+                "status": "deleted" if not req.dry_run else "dry_run",
+                "count": len(stale),
+                "memories": stale,
+            }
     finally:
         put_db(conn)

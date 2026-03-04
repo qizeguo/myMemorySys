@@ -15,7 +15,8 @@ CREATE TABLE IF NOT EXISTS memories (
     access_count INT DEFAULT 1,
     expires_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at TIMESTAMPTZ DEFAULT NOW()
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    last_accessed_at TIMESTAMPTZ DEFAULT NOW()
 );
 
 -- 向量索引表（可重建，记录模型版本）

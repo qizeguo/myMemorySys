@@ -63,6 +63,7 @@ Mac 宿主机 (uv + Python 3.14)          OrbStack (Docker)
 | GET | `/memory/{id}` | 获取单条记忆全文 |
 | DELETE | `/memory/{id}` | 删除记忆 |
 | POST | `/memory/{id}/suppress` | 按 session 抑制记忆（默认 20 次搜索内不返回） |
+| POST | `/cleanup` | 清理过期记忆（默认 60 天未访问，identity 豁免，支持 dry_run） |
 | POST | `/rebuild` | 重建所有向量（模型升级时） |
 
 ### Key Design Decisions
@@ -82,6 +83,7 @@ Mac 宿主机 (uv + Python 3.14)          OrbStack (Docker)
 - 按 session 抑制记忆：Claude 判断注入记忆与话题不相关时可调用 suppress，该记忆在本 session 后续 20 次搜索中不返回，不影响其他会话
 - 模型加载优先本地缓存（local_files_only），不存在 8bit 权重时自动加载全精度并运行时量化
 - 服务启动自动拉起 OrbStack 和 pg18 容器
+- 记忆过期清理：基于 last_accessed_at 字段，60 天未被搜索命中的记忆可通过 /cleanup 清理（identity 类别豁免，默认 dry_run 预览）
 
 ## Directory Structure
 
