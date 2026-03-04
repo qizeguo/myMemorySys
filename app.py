@@ -599,30 +599,68 @@ def delete_memory(memory_id: int):
 class CleanupRequest(BaseModel):
     stale_days: int = 60  # 多少天未访问视为过期，默认 60 天
     exempt_categories: list[str] = Field(default_factory=lambda: ["identity"])
+    target_categories: list[str] | None = None  # 仅清理指定类别（与 exempt 互斥，优先级更高）
+    min_access_count: int | None = None  # 仅清理访问次数 <= 该值的记忆
+    ids: list[int] | None = None  # 指定要删除的记忆 ID 列表（跳过其他过滤条件）
     dry_run: bool = True  # 默认仅预览，不实际删除
 
 
 @app.post("/cleanup")
 def cleanup(req: CleanupRequest):
-    """清理长期未被访问的过期记忆（identity 类别默认豁免）"""
+    """清理过期记忆，支持多种筛选条件
+
+    - 默认: 60天未访问 + identity豁免 + dry_run预览
+    - target_categories: 仅清理指定类别（覆盖 exempt_categories）
+    - min_access_count: 仅清理低访问量记忆
+    - ids: 直接指定要删除的 ID 列表
+    """
     conn = get_db()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(
-                """
-                SELECT id, summary, category, access_count, last_accessed_at
-                FROM memories
-                WHERE last_accessed_at < NOW() - INTERVAL '%s days'
-                  AND category != ALL(%s)
-                ORDER BY last_accessed_at ASC
-                """,
-                (req.stale_days, req.exempt_categories),
-            )
+            if req.ids:
+                # 按 ID 列表直接查询
+                cur.execute(
+                    """
+                    SELECT id, summary, category, access_count, last_accessed_at, created_at
+                    FROM memories WHERE id = ANY(%s)
+                    ORDER BY id
+                    """,
+                    (req.ids,),
+                )
+            else:
+                # 构建动态查询条件
+                conditions = ["last_accessed_at < NOW() - INTERVAL '%s days'"]
+                params: list = [req.stale_days]
+
+                if req.target_categories:
+                    conditions.append("category = ANY(%s)")
+                    params.append(req.target_categories)
+                else:
+                    conditions.append("category != ALL(%s)")
+                    params.append(req.exempt_categories)
+
+                if req.min_access_count is not None:
+                    conditions.append("access_count <= %s")
+                    params.append(req.min_access_count)
+
+                where = " AND ".join(conditions)
+                cur.execute(
+                    f"""
+                    SELECT id, summary, category, access_count, last_accessed_at, created_at
+                    FROM memories
+                    WHERE {where}
+                    ORDER BY last_accessed_at ASC
+                    """,
+                    params,
+                )
+
             stale = cur.fetchall()
 
             for r in stale:
                 if r.get("last_accessed_at"):
                     r["last_accessed_at"] = r["last_accessed_at"].isoformat()
+                if r.get("created_at"):
+                    r["created_at"] = r["created_at"].isoformat()
 
             if not req.dry_run and stale:
                 stale_ids = [r["id"] for r in stale]
