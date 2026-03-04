@@ -106,14 +106,15 @@ fi
 INJECT_JSON="[]"
 INJECT_COUNT=0
 
-for row in $(echo "$RESULTS" | jq -c '.[]'); do
+while IFS= read -r row; do
+    [ -z "$row" ] && continue
     MID=$(echo "$row" | jq -r '.id')
     if [ -z "${CACHE_MAP[$MID]:-}" ]; then
         INJECT_JSON=$(echo "$INJECT_JSON" | jq --argjson item "$row" '. + [$item]')
         CACHE_MAP[$MID]=$TURN
         INJECT_COUNT=$(( INJECT_COUNT + 1 ))
     fi
-done
+done < <(echo "$RESULTS" | jq -c '.[]')
 
 # 注入新记忆
 if [ "$INJECT_COUNT" -gt 0 ]; then
