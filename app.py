@@ -150,6 +150,8 @@ class SaveRequest(BaseModel):
     source: str = "claude_code"
     metadata: dict = Field(default_factory=dict)
     expires_at: str | None = None  # ISO 格式时间戳，到期后搜索自动忽略
+    force: bool = False  # 跳过冲突检测，强制新建
+    update_id: int | None = None  # 指定更新某条已有记忆（用于解决冲突后的明确更新）
 
 
 class UpdateRequest(BaseModel):
@@ -317,7 +319,8 @@ def search(req: SearchRequest):
         put_db(conn)
 
 
-DEDUP_THRESHOLD = 0.92
+DEDUP_THRESHOLD = 0.92   # 高于此值：自动去重（仅更新 access_count）
+CONFLICT_THRESHOLD = 0.72  # 高于此值但低于去重阈值：返回候选，由调用方决定更新或新建
 
 
 def build_embed_input(content: str, summary: str | None = None, tags: list[str] | None = None) -> str:
@@ -333,7 +336,15 @@ def build_embed_input(content: str, summary: str | None = None, tags: list[str] 
 
 @app.post("/save")
 def save(req: SaveRequest):
-    """保存一条新记忆（自动去重：similarity > 0.92 时更新已有记忆而非新建）"""
+    """保存记忆，三层检测：
+
+    1. update_id 指定 → 直接更新目标记忆内容和 embedding
+    2. similarity > 0.92 → 自动去重（仅更新 access_count）
+    3. similarity 0.72-0.92 → 返回候选列表，由调用方决定：
+       - 用 update_id 更新某条已有记忆
+       - 用 force=true 强制新建
+    4. similarity < 0.72 或 force=true → 直接新建
+    """
     embed_input = build_embed_input(req.content, req.summary, req.tags)
     vecs = embed_text(embed_input, "retrieval.passage")
     vec_str = vec_to_str(vecs[0])
@@ -341,28 +352,59 @@ def save(req: SaveRequest):
     conn = get_db()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            # 去重检测：查找高度相似的已有记忆
+            # 如果指定了 update_id，直接更新目标记忆
+            if req.update_id:
+                cur.execute(
+                    """
+                    UPDATE memories
+                    SET content = %s, summary = %s, tags = %s, category = %s,
+                        metadata = %s, expires_at = %s, updated_at = NOW(),
+                        last_accessed_at = NOW()
+                    WHERE id = %s
+                    RETURNING id
+                    """,
+                    (req.content, req.summary, req.tags, req.category,
+                     json.dumps(req.metadata), req.expires_at, req.update_id),
+                )
+                updated = cur.fetchone()
+                if not updated:
+                    raise HTTPException(status_code=404, detail=f"Memory {req.update_id} not found")
+                # 重建 embedding
+                cur.execute(
+                    "DELETE FROM memory_embeddings WHERE memory_id = %s AND model_name = %s",
+                    (req.update_id, MODEL_NAME),
+                )
+                cur.execute(
+                    "INSERT INTO memory_embeddings (memory_id, model_name, embedding) VALUES (%s, %s, %s::vector)",
+                    (req.update_id, MODEL_NAME, vec_str),
+                )
+                conn.commit()
+                return {"status": "updated", "memory_id": req.update_id}
+
+            # 去重检测：查找相似的已有记忆
             cur.execute(
                 """
-                SELECT m.id, 1 - (me.embedding <=> %s::vector) AS similarity
+                SELECT m.id, m.summary, m.category,
+                       1 - (me.embedding <=> %s::vector) AS similarity
                 FROM memory_embeddings me
                 JOIN memories m ON m.id = me.memory_id
                 WHERE me.model_name = %s
                   AND 1 - (me.embedding <=> %s::vector) > %s
                 ORDER BY me.embedding <=> %s::vector
-                LIMIT 1
+                LIMIT 3
                 """,
-                (vec_str, MODEL_NAME, vec_str, DEDUP_THRESHOLD, vec_str),
+                (vec_str, MODEL_NAME, vec_str, CONFLICT_THRESHOLD, vec_str),
             )
-            dup = cur.fetchone()
+            candidates = cur.fetchall()
 
-            if dup:
-                # 已有高度相似记忆，更新 access_count 和 updated_at
+            # 高度相似 → 自动去重
+            if candidates and float(candidates[0]["similarity"]) > DEDUP_THRESHOLD:
+                dup = candidates[0]
                 cur.execute(
                     """
                     UPDATE memories
                     SET access_count = access_count + 1,
-                        updated_at = NOW()
+                        updated_at = NOW(), last_accessed_at = NOW()
                     WHERE id = %s
                     RETURNING id, access_count
                     """,
@@ -377,7 +419,23 @@ def save(req: SaveRequest):
                     "similarity": round(float(dup["similarity"]), 4),
                 }
 
-            # 无重复，正常插入
+            # 中等相似度 → 返回候选，由调用方决定
+            if candidates and not req.force:
+                return {
+                    "status": "conflict",
+                    "message": "发现相似记忆，请决定：用 update_id 更新已有记忆，或 force=true 强制新建",
+                    "candidates": [
+                        {
+                            "id": c["id"],
+                            "summary": c["summary"],
+                            "category": c["category"],
+                            "similarity": round(float(c["similarity"]), 4),
+                        }
+                        for c in candidates
+                    ],
+                }
+
+            # 无冲突或 force=true → 正常插入
             cur.execute(
                 """
                 INSERT INTO memories (content, summary, tags, category, source, metadata, expires_at)

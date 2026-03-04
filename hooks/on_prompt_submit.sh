@@ -53,6 +53,11 @@ cat <<'INSTRUCTIONS' | sed "s/MEMORY_SESSION_PLACEHOLDER/$SESSION_ID/g"
 - tags: 3-5 个关键词 | summary: 一句话概括
 - category: identity | preference | decision | architecture | project | research | code | bug | conversation | general
 
+【冲突处理】/save 返回 status=conflict 时，说明存在相似记忆：
+- 如果新内容是对旧内容的更新/修正 → 用 update_id 更新: curl -s http://localhost:9776/save -H "Content-Type: application/json" -d '{"content":"新内容","update_id":旧id,"tags":[...],"category":"...","summary":"..."}'
+- 如果确实是不同的记忆 → 加 force: curl -s http://localhost:9776/save -H "Content-Type: application/json" -d '{"content":"...","force":true,...}'
+- 不要忽略 conflict 响应，必须处理
+
 【更新记忆】调用: curl -s -X PUT http://localhost:9776/memory/{id} -H "Content-Type: application/json" -d '{"content":"...","summary":"...","tags":[...],"category":"..."}'
 
 【查看/管理记忆】

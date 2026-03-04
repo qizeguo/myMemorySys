@@ -71,7 +71,8 @@ Mac 宿主机 (uv + Python 3.14)          OrbStack (Docker)
 - Embedding 模型: `jinaai/jina-embeddings-v5-text-small-retrieval-mlx` 8bit (1024 dims)
 - MLX 仅支持 macOS，服务运行在宿主机，PG 在 OrbStack 容器
 - Hook 注入 summary 而非全文（节省 token），Claude 需要细节时按 id 取全文
-- 保存去重：similarity > 0.92 时更新 access_count 而非新建，防止 memory explosion
+- 保存三层检测：similarity > 0.92 自动去重；0.72-0.92 返回候选由 LLM 决定更新或新建；< 0.72 直接新建
+- save 支持 update_id（更新指定记忆）和 force（跳过冲突检测强制新建）
 - 搜索命中自动更新 access_count，驱动 importance 因子
 - 多因子评分排序：`score = similarity × 0.65 + category × 0.20 + recency × 0.10 + importance × 0.05`
 - 增量注入：5 轮保护期内不重复注入同一记忆，过期自动清理，首轮/压缩后最多 10 条，后续最多 5 条

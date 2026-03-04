@@ -32,7 +32,7 @@ Mac 宿主机                                  OrbStack
 - **复合 Embedding**：保存时将 `tags + summary + content` 拼接后生成单一向量，关键词前置提升检索召回率
 - **多因子评分排序**：`score = similarity × 0.65 + category × 0.20 + recency × 0.10 + importance × 0.05`，每个 category 有独立时间衰减半衰期
 - **搜索命中更新 access_count**：被检索到的记忆自动提升重要性权重
-- **自动去重**：保存时检测 similarity > 0.92 的已有记忆，更新 access_count 而非重复创建
+- **智能去重与冲突检测**：保存时三层检测——similarity > 0.92 自动去重；0.72-0.92 返回候选由 LLM 决定更新或新建；< 0.72 直接新建。支持 `update_id` 明确更新和 `force` 强制新建
 - **记忆过期**：支持 `expires_at` 字段，临时记忆到期后搜索自动忽略
 - **10 种记忆类别**：identity / preference / decision / architecture / project / research / code / bug / conversation / general，按重要性差异化权重和衰减速度
 - **连接池**：SimpleConnectionPool(1-5) 管理数据库连接，避免频繁建连
@@ -339,7 +339,7 @@ final_score = similarity × 0.65 + category_weight × 0.20 + recency × 0.10 + i
 | GET | `/health` | 健康检查 | — |
 | POST | `/embed` | 生成 embedding | `{"text": "...", "task_type": "retrieval.query"}` |
 | POST | `/search` | 搜索记忆（多因子评分 + 过期过滤 + session 抑制） | `{"query": "...", "limit": 5, "min_similarity": 0.3, "session_id": "..."}` |
-| POST | `/save` | 保存记忆（复合 embedding + 自动去重） | `{"content": "...", "tags": [...], "category": "...", "summary": "...", "expires_at": "..."}` |
+| POST | `/save` | 保存记忆（去重 + 冲突检测） | `{"content": "...", "tags": [...], "category": "...", "summary": "...", "update_id": null, "force": false}` |
 | GET | `/memories` | 列出记忆（筛选 + 分页 + 排序） | query params: `category`, `limit`, `offset`, `sort` |
 | PUT | `/memory/{id}` | 更新记忆（部分更新 + 重建 embedding） | `{"content": "...", "summary": "...", "tags": [...]}` |
 | GET | `/memory/{id}` | 获取单条记忆全文 | — |
