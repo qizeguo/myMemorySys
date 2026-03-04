@@ -17,6 +17,7 @@ Mac 宿主机 (uv + Python 3.14)          OrbStack (Docker)
 │  /health /embed /search      │       │ memory_embeddings 表 │
 │  /save /rebuild /memories    │       └─────────────────────┘
 │  /memory/{id} (GET/PUT/DEL)  │
+│  /memory/{id}/suppress       │
 │                              │
 │ Hooks:                       │
 │  on_prompt_submit.sh         │
@@ -55,12 +56,13 @@ Mac 宿主机 (uv + Python 3.14)          OrbStack (Docker)
 |--------|------|---------|
 | GET | `/health` | 健康检查（含 DB 状态） |
 | POST | `/embed` | 生成 embedding 向量 |
-| POST | `/search` | 语义搜索记忆（多因子评分 + expires_at 过滤） |
+| POST | `/search` | 语义搜索记忆（多因子评分 + expires_at 过滤 + session 抑制过滤） |
 | POST | `/save` | 保存新记忆（自动去重 + 可选 expires_at） |
 | GET | `/memories` | 列出记忆（category 筛选 + 分页 + 排序） |
 | PUT | `/memory/{id}` | 更新记忆（部分更新 + 自动重建 embedding） |
 | GET | `/memory/{id}` | 获取单条记忆全文 |
 | DELETE | `/memory/{id}` | 删除记忆 |
+| POST | `/memory/{id}/suppress` | 按 session 抑制记忆（默认 20 次搜索内不返回） |
 | POST | `/rebuild` | 重建所有向量（模型升级时） |
 
 ### Key Design Decisions
@@ -77,6 +79,9 @@ Mac 宿主机 (uv + Python 3.14)          OrbStack (Docker)
 - 实时保存优先：引导 Claude 边做边存，不依赖会话结束时的一次性总结
 - expires_at：支持临时记忆到期自动过滤
 - 连接池：SimpleConnectionPool(1-5) 管理数据库连接
+- 按 session 抑制记忆：Claude 判断注入记忆与话题不相关时可调用 suppress，该记忆在本 session 后续 20 次搜索中不返回，不影响其他会话
+- 模型加载优先本地缓存（local_files_only），不存在 8bit 权重时自动加载全精度并运行时量化
+- 服务启动自动拉起 OrbStack 和 pg18 容器
 
 ## Directory Structure
 

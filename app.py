@@ -66,6 +66,8 @@ DEFAULT_CATEGORY_CONFIG = {"weight": 0.5, "half_life": 60}
 # ============================================================
 _model = None
 _tokenizer = None
+# 按 session 隔离的记忆抑制: {session_id: {memory_id: remaining_turns}}
+_suppressed: dict[str, dict[int, int]] = {}
 
 
 def _load_model():
@@ -137,6 +139,7 @@ class SearchRequest(BaseModel):
     limit: int = 5
     category: str | None = None
     min_similarity: float = 0.5
+    session_id: str | None = None  # 传入时自动过滤该 session 抑制的记忆
 
 
 class SaveRequest(BaseModel):
@@ -278,6 +281,25 @@ def search(req: SearchRequest):
             r["created_at"] = r["created_at"].isoformat()
 
         results.sort(key=lambda r: r["score"], reverse=True)
+
+        # 过滤该 session 抑制的记忆，并递减计数
+        if req.session_id and req.session_id in _suppressed:
+            sess_sup = _suppressed[req.session_id]
+            filtered = []
+            for r in results:
+                if r["id"] in sess_sup:
+                    continue
+                filtered.append(r)
+            results = filtered
+            # 递减所有抑制计数，清理到期的
+            expired = [mid for mid, cnt in sess_sup.items() if cnt <= 1]
+            for mid in expired:
+                del sess_sup[mid]
+            for mid in sess_sup:
+                sess_sup[mid] -= 1
+            if not sess_sup:
+                del _suppressed[req.session_id]
+
         top = results[: req.limit]
 
         # Fix #1: 搜索命中时更新 access_count
@@ -542,6 +564,20 @@ def get_memory(memory_id: int):
             return row
     finally:
         put_db(conn)
+
+
+class SuppressRequest(BaseModel):
+    session_id: str
+    turns: int = 20  # 抑制轮次，默认 20 次搜索内不返回该记忆
+
+
+@app.post("/memory/{memory_id}/suppress")
+def suppress_memory(memory_id: int, req: SuppressRequest):
+    """抑制某条记忆，在指定 session 的后续 N 次搜索中不返回"""
+    if req.session_id not in _suppressed:
+        _suppressed[req.session_id] = {}
+    _suppressed[req.session_id][memory_id] = req.turns
+    return {"status": "ok", "memory_id": memory_id, "session_id": req.session_id, "suppressed_turns": req.turns}
 
 
 @app.delete("/memory/{memory_id}")

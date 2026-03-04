@@ -36,6 +36,9 @@ Mac 宿主机                                  OrbStack
 - **记忆过期**：支持 `expires_at` 字段，临时记忆到期后搜索自动忽略
 - **10 种记忆类别**：identity / preference / decision / architecture / project / research / code / bug / conversation / general，按重要性差异化权重和衰减速度
 - **连接池**：SimpleConnectionPool(1-5) 管理数据库连接，避免频繁建连
+- **按 session 抑制记忆**：Claude 判断注入记忆与当前话题不相关时调用 suppress，该记忆在本会话后续 20 次搜索中不返回，不影响其他会话
+- **模型加载容错**：优先使用本地缓存（不联网），支持 8bit 预量化权重和全精度运行时量化两种模式
+- **服务自启动**：启动时自动拉起 OrbStack 和 PostgreSQL 容器
 
 ## 前置要求
 
@@ -245,6 +248,11 @@ curl -s -X PUT http://localhost:9776/memory/42 \
 
 # 删除记忆
 curl -s -X DELETE http://localhost:9776/memory/42
+
+# 抑制不相关记忆（本 session 后续 20 次搜索不返回该记忆）
+curl -s -X POST http://localhost:9776/memory/42/suppress \
+    -H "Content-Type: application/json" \
+    -d '{"session_id": "your-session-id", "turns": 20}'
 ```
 
 ## 搜索评分公式
@@ -301,12 +309,13 @@ final_score = similarity × 0.65 + category_weight × 0.20 + recency × 0.10 + i
 |------|------|------|-----------|
 | GET | `/health` | 健康检查 | — |
 | POST | `/embed` | 生成 embedding | `{"text": "...", "task_type": "retrieval.query"}` |
-| POST | `/search` | 搜索记忆（多因子评分 + 过期过滤） | `{"query": "...", "limit": 5, "min_similarity": 0.5}` |
+| POST | `/search` | 搜索记忆（多因子评分 + 过期过滤 + session 抑制） | `{"query": "...", "limit": 5, "min_similarity": 0.3, "session_id": "..."}` |
 | POST | `/save` | 保存记忆（复合 embedding + 自动去重） | `{"content": "...", "tags": [...], "category": "...", "summary": "...", "expires_at": "..."}` |
 | GET | `/memories` | 列出记忆（筛选 + 分页 + 排序） | query params: `category`, `limit`, `offset`, `sort` |
 | PUT | `/memory/{id}` | 更新记忆（部分更新 + 重建 embedding） | `{"content": "...", "summary": "...", "tags": [...]}` |
 | GET | `/memory/{id}` | 获取单条记忆全文 | — |
 | DELETE | `/memory/{id}` | 删除记忆 | — |
+| POST | `/memory/{id}/suppress` | 按 session 抑制记忆 | `{"session_id": "...", "turns": 20}` |
 | POST | `/rebuild` | 重建所有向量（复合 embedding） | `{"batch_size": 64}` |
 
 ## 环境变量

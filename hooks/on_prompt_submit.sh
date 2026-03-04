@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/opt/homebrew/bin/bash
 # Hook: UserPromptSubmit
 # 每次用户提交 prompt 时：
 #   1. 注入记忆系统指令（常驻）
@@ -36,7 +36,7 @@ if [ -z "$PROMPT" ] || [ ${#PROMPT} -lt 5 ]; then
 fi
 
 # ── 1. 常驻指令（每次注入） ──
-cat <<'INSTRUCTIONS'
+cat <<'INSTRUCTIONS' | sed "s/MEMORY_SESSION_PLACEHOLDER/$SESSION_ID/g"
 <memory-system-instructions>
 你已接入长期记忆系统 (localhost:9776)。遵循以下规则：
 
@@ -60,6 +60,10 @@ cat <<'INSTRUCTIONS'
 - 列表筛选: curl -s "http://localhost:9776/memories?category=project&limit=10"
 - 删除: curl -s -X DELETE http://localhost:9776/memory/{id}
 
+【抑制不相关记忆】当注入的记忆与当前话题明显不相关时：
+- 调用: curl -s -X POST http://localhost:9776/memory/{id}/suppress -H "Content-Type: application/json" -d '{"session_id":"MEMORY_SESSION_PLACEHOLDER","turns":20}'
+- 该记忆将在本会话后续 20 次交互中不再注入，不影响其他会话
+
 【清理过时记忆】当搜索结果中出现明显过时、已被推翻或与当前事实矛盾的记忆时：
 - 主动告知用户该记忆已过时，并调用: curl -s -X DELETE http://localhost:9776/memory/{id}
 - 如有需要，保存一条更新后的记忆替代
@@ -72,7 +76,7 @@ if [ ${#PROMPT} -lt 10 ]; then
 fi
 
 # 读取缓存并清理过期条目（超过保护期的直接删除）
-declare -A CACHE_MAP
+declare -A CACHE_MAP=()
 if [ -f "$CACHE_FILE" ]; then
     while IFS=: read -r mid mturn; do
         if [ -n "$mid" ] && [ $(( TURN - mturn )) -le "$PROTECT_TURNS" ]; then
@@ -90,7 +94,7 @@ fi
 
 RESULTS=$(curl -sf --max-time 10 "$MEMORY_API/search" \
     -H "Content-Type: application/json" \
-    -d "{\"query\": $(echo "$PROMPT" | jq -Rs .), \"limit\": $SEARCH_LIMIT, \"min_similarity\": 0.5}" \
+    -d "{\"query\": $(echo "$PROMPT" | jq -Rs .), \"limit\": $SEARCH_LIMIT, \"min_similarity\": 0.3, \"session_id\": \"$SESSION_ID\"}" \
     2>/dev/null || echo "[]")
 
 COUNT=$(echo "$RESULTS" | jq 'length')
