@@ -15,6 +15,7 @@ import psycopg2
 import psycopg2.extras
 import psycopg2.pool
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse
 from huggingface_hub import snapshot_download
 from pydantic import BaseModel, Field
 from tokenizers import Tokenizer
@@ -201,6 +202,12 @@ def vec_to_str(vec: list[float]) -> str:
 # ============================================================
 # API 端点
 # ============================================================
+@app.get("/", response_class=HTMLResponse)
+def serve_frontend():
+    html_path = Path(__file__).parent / "static" / "index.html"
+    return HTMLResponse(content=html_path.read_text(encoding="utf-8"))
+
+
 @app.get("/health")
 def health():
     status = {"status": "ok", "model": MODEL_NAME}

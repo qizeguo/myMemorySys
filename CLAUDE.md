@@ -14,8 +14,9 @@ Mac 宿主机 (uv + Python 3.14)          OrbStack (Docker)
 │ app.py (FastAPI, port 9776)  │       │ PostgreSQL + pgvector│
 │  MLX embedding (8bit)        │──DB──→│ port 5432            │
 │  连接池 (SimpleConnectionPool)│       │ memories 表          │
-│  /health /embed /search      │       │ memory_embeddings 表 │
-│  /save /rebuild /memories    │       └─────────────────────┘
+│  / (前端 Dashboard)          │       │ memory_embeddings 表 │
+│  /health /embed /search      │       └─────────────────────┘
+│  /save /rebuild /memories    │
 │  /memory/{id} (GET/PUT/DEL)  │
 │  /memory/{id}/suppress       │
 │                              │
@@ -54,6 +55,7 @@ Mac 宿主机 (uv + Python 3.14)          OrbStack (Docker)
 ### API Endpoints (port 9776)
 | Method | Path | Purpose |
 |--------|------|---------|
+| GET | `/` | 前端 Dashboard |
 | GET | `/health` | 健康检查（含 DB 状态） |
 | POST | `/embed` | 生成 embedding 向量 |
 | POST | `/search` | 语义搜索记忆（多因子评分 + expires_at 过滤 + session 抑制过滤） |
@@ -97,6 +99,8 @@ Mac 宿主机 (uv + Python 3.14)          OrbStack (Docker)
 ├── hooks/
 │   ├── on_prompt_submit.sh     # UserPromptSubmit hook（指令 + 增量搜索 + 话题切换检测）
 │   └── on_pre_compact.sh       # PreCompact hook（清缓存 + 提醒保存）
+├── static/
+│   └── index.html              # 前端 Dashboard（单文件 HTML + Pico CSS + vanilla JS）
 ├── scripts/
 │   └── deploy.sh               # 一键部署（建表 + 依赖 + 模型 + hooks）
 ├── docker-compose.yml          # PostgreSQL (pgvector/pgvector:pg18)

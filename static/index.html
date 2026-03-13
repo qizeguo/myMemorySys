@@ -1,0 +1,672 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Memory System Dashboard</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
+  <style>
+    :root {
+      --health-ok: #2ecc40;
+      --health-err: #ff4136;
+      --score-bg: #f0f4ff;
+    }
+    body { margin: 0; }
+    header.top-bar {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0.75rem 1.5rem; border-bottom: 1px solid var(--pico-muted-border-color);
+    }
+    header.top-bar h1 { margin: 0; font-size: 1.3rem; }
+    .health-dot {
+      display: inline-block; width: 10px; height: 10px; border-radius: 50%;
+      margin-right: 6px; background: var(--health-err);
+    }
+    .health-dot.ok { background: var(--health-ok); }
+    .health-label { font-size: 0.85rem; color: var(--pico-muted-color); }
+
+    main.container { max-width: 1100px; padding: 1rem 1.5rem; }
+
+    .toolbar {
+      display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; margin-bottom: 1rem;
+    }
+    .toolbar input[type="search"] { flex: 1; min-width: 200px; margin: 0; }
+    .toolbar select { width: auto; margin: 0; }
+    .toolbar button { margin: 0; white-space: nowrap; }
+
+    table { font-size: 0.9rem; }
+    table th, table td { padding: 0.5rem 0.65rem; }
+    table td.summary-cell {
+      max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    table td.tags-cell { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    tr.clickable { cursor: pointer; }
+    tr.clickable:hover { background: var(--pico-card-background-color); }
+
+    .pagination {
+      display: flex; justify-content: center; align-items: center; gap: 1rem; margin-top: 1rem;
+    }
+    .pagination span { font-size: 0.9rem; }
+
+    .badge {
+      display: inline-block; font-size: 0.75rem; padding: 0.1em 0.5em;
+      border-radius: 4px; background: var(--pico-secondary-background); color: var(--pico-secondary);
+    }
+    .score-badge {
+      background: var(--score-bg); color: #336; font-weight: 600;
+    }
+
+    dialog { max-width: 640px; width: 90vw; }
+    dialog article { margin: 0; }
+    dialog .field-group { margin-bottom: 0.75rem; }
+    dialog .field-group label { font-size: 0.85rem; margin-bottom: 0.25rem; display: block; }
+    dialog textarea { min-height: 120px; }
+    dialog .actions { display: flex; gap: 0.5rem; justify-content: flex-end; margin-top: 1rem; }
+
+    .conflict-list { list-style: none; padding: 0; }
+    .conflict-list li {
+      padding: 0.5rem; margin-bottom: 0.5rem; border: 1px solid var(--pico-muted-border-color);
+      border-radius: 6px; cursor: pointer;
+    }
+    .conflict-list li:hover { background: var(--pico-card-background-color); }
+    .conflict-sim { float: right; font-size: 0.8rem; color: var(--pico-muted-color); }
+
+    .detail-row th { width: 100px; vertical-align: top; font-size: 0.85rem; }
+    .detail-row td { font-size: 0.9rem; white-space: pre-wrap; word-break: break-word; }
+
+    .empty-state { text-align: center; padding: 3rem; color: var(--pico-muted-color); }
+
+    .search-results .score { color: #666; font-size: 0.8rem; }
+  </style>
+</head>
+<body>
+
+<header class="top-bar">
+  <h1>Memory System</h1>
+  <div>
+    <span class="health-dot" id="healthDot"></span>
+    <span class="health-label" id="healthLabel">Checking...</span>
+  </div>
+</header>
+
+<main class="container">
+  <!-- Toolbar -->
+  <div class="toolbar">
+    <input type="search" id="searchInput" placeholder="语义搜索记忆..." aria-label="Search">
+    <button id="searchBtn" class="outline">搜索</button>
+    <button id="newBtn" class="secondary">+ 新建</button>
+    <button id="cleanupBtn" class="outline contrast">清理过期</button>
+  </div>
+  <div class="toolbar">
+    <label style="margin:0;font-size:0.85rem;">
+      Category:
+      <select id="categoryFilter" style="margin-left:4px;">
+        <option value="">全部</option>
+        <option value="identity">identity</option>
+        <option value="preference">preference</option>
+        <option value="decision">decision</option>
+        <option value="architecture">architecture</option>
+        <option value="project">project</option>
+        <option value="research">research</option>
+        <option value="code">code</option>
+        <option value="bug">bug</option>
+        <option value="conversation">conversation</option>
+        <option value="general">general</option>
+      </select>
+    </label>
+    <label style="margin:0;font-size:0.85rem;">
+      Sort:
+      <select id="sortSelect" style="margin-left:4px;">
+        <option value="created_at">创建时间</option>
+        <option value="updated_at">更新时间</option>
+        <option value="access_count">访问次数</option>
+      </select>
+    </label>
+  </div>
+
+  <!-- Memory Table -->
+  <div id="tableContainer">
+    <table role="grid">
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Summary</th>
+          <th>Category</th>
+          <th>Tags</th>
+          <th>Access</th>
+          <th>Created</th>
+        </tr>
+      </thead>
+      <tbody id="memoryTableBody">
+        <tr><td colspan="6" class="empty-state">加载中...</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Pagination -->
+  <div class="pagination" id="pagination" style="display:none;">
+    <button id="prevBtn" class="outline" disabled>← 上一页</button>
+    <span id="pageInfo">Page 1 of 1</span>
+    <button id="nextBtn" class="outline" disabled>下一页 →</button>
+  </div>
+</main>
+
+<!-- Detail Dialog -->
+<dialog id="detailDialog">
+  <article>
+    <header>
+      <button aria-label="Close" rel="prev" onclick="detailDialog.close()"></button>
+      <h3>记忆详情 #<span id="detailId"></span></h3>
+    </header>
+    <table class="detail-row">
+      <tr><th>Summary</th><td id="detailSummary"></td></tr>
+      <tr><th>Category</th><td id="detailCategory"></td></tr>
+      <tr><th>Tags</th><td id="detailTags"></td></tr>
+      <tr><th>Content</th><td id="detailContent"></td></tr>
+      <tr><th>Metadata</th><td id="detailMeta"></td></tr>
+      <tr><th>Access</th><td id="detailAccess"></td></tr>
+      <tr><th>Expires</th><td id="detailExpires"></td></tr>
+      <tr><th>Created</th><td id="detailCreated"></td></tr>
+      <tr><th>Updated</th><td id="detailUpdated"></td></tr>
+    </table>
+    <div class="actions">
+      <button id="detailEditBtn" class="secondary">编辑</button>
+      <button id="detailDeleteBtn" class="outline" style="color:var(--health-err);">删除</button>
+    </div>
+  </article>
+</dialog>
+
+<!-- Edit/New Dialog -->
+<dialog id="editDialog">
+  <article>
+    <header>
+      <button aria-label="Close" rel="prev" onclick="editDialog.close()"></button>
+      <h3 id="editTitle">编辑记忆</h3>
+    </header>
+    <form id="editForm" onsubmit="return false;">
+      <input type="hidden" id="editId">
+      <div class="field-group">
+        <label for="editContent">Content *</label>
+        <textarea id="editContent" required></textarea>
+      </div>
+      <div class="field-group">
+        <label for="editSummary">Summary</label>
+        <input type="text" id="editSummary">
+      </div>
+      <div class="field-group">
+        <label for="editTags">Tags (逗号分隔)</label>
+        <input type="text" id="editTags">
+      </div>
+      <div class="field-group">
+        <label for="editCategory">Category</label>
+        <select id="editCategory">
+          <option value="identity">identity</option>
+          <option value="preference">preference</option>
+          <option value="decision">decision</option>
+          <option value="architecture">architecture</option>
+          <option value="project">project</option>
+          <option value="research">research</option>
+          <option value="code">code</option>
+          <option value="bug">bug</option>
+          <option value="conversation">conversation</option>
+          <option value="general" selected>general</option>
+        </select>
+      </div>
+      <div class="field-group">
+        <label for="editExpires">Expires At (可选, ISO格式)</label>
+        <input type="datetime-local" id="editExpires">
+      </div>
+      <div class="actions">
+        <button type="button" class="outline" onclick="editDialog.close()">取消</button>
+        <button type="submit" id="editSaveBtn">保存</button>
+      </div>
+    </form>
+    <!-- Conflict section (hidden by default) -->
+    <div id="conflictSection" style="display:none;">
+      <hr>
+      <h4>发现相似记忆</h4>
+      <p style="font-size:0.85rem;color:var(--pico-muted-color);">点击候选记忆进行更新，或强制新建。</p>
+      <ul class="conflict-list" id="conflictList"></ul>
+      <div class="actions">
+        <button id="forceCreateBtn" class="secondary">强制新建</button>
+      </div>
+    </div>
+  </article>
+</dialog>
+
+<!-- Cleanup Dialog -->
+<dialog id="cleanupDialog">
+  <article>
+    <header>
+      <button aria-label="Close" rel="prev" onclick="cleanupDialog.close()"></button>
+      <h3>清理过期记忆</h3>
+    </header>
+    <form id="cleanupForm" onsubmit="return false;">
+      <div class="field-group">
+        <label for="cleanupDays">未访问天数阈值</label>
+        <input type="number" id="cleanupDays" value="60" min="1">
+      </div>
+      <div class="field-group">
+        <label for="cleanupMinAccess">最大访问次数 (可选)</label>
+        <input type="number" id="cleanupMinAccess" placeholder="不限" min="0">
+      </div>
+      <div class="actions">
+        <button type="submit" id="cleanupPreviewBtn">预览</button>
+      </div>
+    </form>
+    <!-- Preview results -->
+    <div id="cleanupPreview" style="display:none;">
+      <hr>
+      <p><strong>将清理 <span id="cleanupCount">0</span> 条记忆：</strong></p>
+      <div style="max-height:300px;overflow-y:auto;">
+        <table>
+          <thead><tr><th>ID</th><th>Summary</th><th>Category</th><th>Last Access</th></tr></thead>
+          <tbody id="cleanupTableBody"></tbody>
+        </table>
+      </div>
+      <div class="actions">
+        <button class="outline" onclick="cleanupDialog.close()">取消</button>
+        <button id="cleanupConfirmBtn" style="background:var(--health-err);">确认删除</button>
+      </div>
+    </div>
+  </article>
+</dialog>
+
+<!-- Delete Confirm Dialog -->
+<dialog id="deleteDialog">
+  <article>
+    <header>
+      <button aria-label="Close" rel="prev" onclick="deleteDialog.close()"></button>
+      <h3>确认删除</h3>
+    </header>
+    <p>确定要删除记忆 #<span id="deleteId"></span> 吗？此操作不可撤销。</p>
+    <div class="actions">
+      <button class="outline" onclick="deleteDialog.close()">取消</button>
+      <button id="deleteConfirmBtn" style="background:var(--health-err);">删除</button>
+    </div>
+  </article>
+</dialog>
+
+<script>
+// ============================================================
+// State
+// ============================================================
+let currentPage = 0;
+let pageSize = 20;
+let totalMemories = 0;
+let isSearchMode = false;
+let searchResults = [];
+let currentDetailId = null;
+let pendingSaveData = null;
+
+const $ = (sel) => document.querySelector(sel);
+const detailDialog = $('#detailDialog');
+const editDialog = $('#editDialog');
+const cleanupDialog = $('#cleanupDialog');
+const deleteDialog = $('#deleteDialog');
+
+// ============================================================
+// API helpers
+// ============================================================
+async function api(path, opts = {}) {
+  const res = await fetch(path, {
+    headers: { 'Content-Type': 'application/json' },
+    ...opts,
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail || `HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
+// ============================================================
+// Health check
+// ============================================================
+async function checkHealth() {
+  try {
+    const data = await api('/health');
+    const ok = data.status === 'ok' && data.database === 'ok';
+    $('#healthDot').className = 'health-dot' + (ok ? ' ok' : '');
+    $('#healthLabel').textContent = ok ? 'OK' : 'DB Error';
+  } catch {
+    $('#healthDot').className = 'health-dot';
+    $('#healthLabel').textContent = 'Offline';
+  }
+}
+checkHealth();
+setInterval(checkHealth, 30000);
+
+// ============================================================
+// Memory list
+// ============================================================
+async function loadMemories() {
+  isSearchMode = false;
+  const category = $('#categoryFilter').value;
+  const sort = $('#sortSelect').value;
+  const offset = currentPage * pageSize;
+
+  try {
+    const params = new URLSearchParams({ limit: pageSize, offset, sort });
+    if (category) params.set('category', category);
+    const data = await api('/memories?' + params);
+
+    totalMemories = data.total;
+    renderTable(data.memories, false);
+    renderPagination();
+  } catch (e) {
+    $('#memoryTableBody').innerHTML = `<tr><td colspan="6" class="empty-state">加载失败: ${esc(e.message)}</td></tr>`;
+  }
+}
+
+function renderTable(rows, isSearch) {
+  const tbody = $('#memoryTableBody');
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="6" class="empty-state">暂无记忆</td></tr>';
+    return;
+  }
+  tbody.innerHTML = rows.map(r => `
+    <tr class="clickable" data-id="${r.id}">
+      <td>${r.id}</td>
+      <td class="summary-cell" title="${esc(r.summary || '')}">${esc(r.summary || '(无摘要)')}</td>
+      <td><span class="badge">${esc(r.category || '')}</span></td>
+      <td class="tags-cell" title="${esc((r.tags || []).join(', '))}">${esc((r.tags || []).join(', '))}</td>
+      <td>${r.access_count || 0}${isSearch ? ` <span class="badge score-badge">${r.score}</span>` : ''}</td>
+      <td>${formatDate(r.created_at)}</td>
+    </tr>
+  `).join('');
+}
+
+function renderPagination() {
+  const totalPages = Math.max(1, Math.ceil(totalMemories / pageSize));
+  const cur = currentPage + 1;
+  $('#pageInfo').textContent = `${cur} / ${totalPages}`;
+  $('#prevBtn').disabled = currentPage <= 0;
+  $('#nextBtn').disabled = cur >= totalPages;
+  $('#pagination').style.display = isSearchMode ? 'none' : 'flex';
+}
+
+// ============================================================
+// Search
+// ============================================================
+async function doSearch() {
+  const query = $('#searchInput').value.trim();
+  if (!query) { loadMemories(); return; }
+
+  isSearchMode = true;
+  try {
+    const data = await api('/search', {
+      method: 'POST',
+      body: JSON.stringify({ query, limit: 20, min_similarity: 0.3 }),
+    });
+    searchResults = data;
+    renderTable(data, true);
+    $('#pagination').style.display = 'none';
+  } catch (e) {
+    $('#memoryTableBody').innerHTML = `<tr><td colspan="6" class="empty-state">搜索失败: ${esc(e.message)}</td></tr>`;
+  }
+}
+
+// ============================================================
+// Detail
+// ============================================================
+async function showDetail(id) {
+  try {
+    const m = await api(`/memory/${id}`);
+    currentDetailId = id;
+    $('#detailId').textContent = m.id;
+    $('#detailSummary').textContent = m.summary || '(无)';
+    $('#detailCategory').innerHTML = `<span class="badge">${esc(m.category || '')}</span>`;
+    $('#detailTags').textContent = (m.tags || []).join(', ') || '(无)';
+    $('#detailContent').textContent = m.content || '';
+    $('#detailMeta').textContent = m.metadata ? JSON.stringify(m.metadata, null, 2) : '(无)';
+    $('#detailAccess').textContent = m.access_count || 0;
+    $('#detailExpires').textContent = m.expires_at ? formatDate(m.expires_at) : '(永不过期)';
+    $('#detailCreated').textContent = formatDate(m.created_at);
+    $('#detailUpdated').textContent = formatDate(m.updated_at);
+    detailDialog.showModal();
+  } catch (e) {
+    alert('获取详情失败: ' + e.message);
+  }
+}
+
+// ============================================================
+// Edit / New
+// ============================================================
+function openEditDialog(memory) {
+  $('#conflictSection').style.display = 'none';
+  if (memory) {
+    $('#editTitle').textContent = '编辑记忆 #' + memory.id;
+    $('#editId').value = memory.id;
+    $('#editContent').value = memory.content || '';
+    $('#editSummary').value = memory.summary || '';
+    $('#editTags').value = (memory.tags || []).join(', ');
+    $('#editCategory').value = memory.category || 'general';
+    $('#editExpires').value = memory.expires_at ? memory.expires_at.slice(0, 16) : '';
+  } else {
+    $('#editTitle').textContent = '新建记忆';
+    $('#editId').value = '';
+    $('#editContent').value = '';
+    $('#editSummary').value = '';
+    $('#editTags').value = '';
+    $('#editCategory').value = 'general';
+    $('#editExpires').value = '';
+  }
+  editDialog.showModal();
+}
+
+async function handleSave() {
+  const id = $('#editId').value;
+  const content = $('#editContent').value.trim();
+  if (!content) { alert('Content 不能为空'); return; }
+
+  const tags = $('#editTags').value.split(',').map(t => t.trim()).filter(Boolean);
+  const summary = $('#editSummary').value.trim() || null;
+  const category = $('#editCategory').value;
+  const expiresRaw = $('#editExpires').value;
+  const expires_at = expiresRaw ? new Date(expiresRaw).toISOString() : null;
+
+  try {
+    if (id) {
+      // Update existing
+      await api(`/memory/${id}`, {
+        method: 'PUT',
+        body: JSON.stringify({ content, summary, tags, category, expires_at }),
+      });
+      editDialog.close();
+      detailDialog.close();
+      loadMemories();
+    } else {
+      // New: use /save with conflict detection
+      pendingSaveData = { content, summary, tags, category, expires_at };
+      const res = await api('/save', {
+        method: 'POST',
+        body: JSON.stringify({ content, summary, tags, category, expires_at }),
+      });
+
+      if (res.status === 'conflict') {
+        showConflict(res.candidates);
+      } else {
+        editDialog.close();
+        loadMemories();
+      }
+    }
+  } catch (e) {
+    alert('保存失败: ' + e.message);
+  }
+}
+
+function showConflict(candidates) {
+  const list = $('#conflictList');
+  list.innerHTML = candidates.map(c => `
+    <li data-id="${c.id}">
+      <span class="conflict-sim">similarity: ${c.similarity}</span>
+      <strong>#${c.id}</strong> [${esc(c.category || '')}]<br>
+      ${esc(c.summary || '(无摘要)')}
+    </li>
+  `).join('');
+  $('#conflictSection').style.display = 'block';
+}
+
+async function handleConflictUpdate(updateId) {
+  if (!pendingSaveData) return;
+  try {
+    await api('/save', {
+      method: 'POST',
+      body: JSON.stringify({ ...pendingSaveData, update_id: updateId }),
+    });
+    editDialog.close();
+    loadMemories();
+  } catch (e) {
+    alert('更新失败: ' + e.message);
+  }
+}
+
+async function handleForceCreate() {
+  if (!pendingSaveData) return;
+  try {
+    await api('/save', {
+      method: 'POST',
+      body: JSON.stringify({ ...pendingSaveData, force: true }),
+    });
+    editDialog.close();
+    loadMemories();
+  } catch (e) {
+    alert('创建失败: ' + e.message);
+  }
+}
+
+// ============================================================
+// Delete
+// ============================================================
+function confirmDelete(id) {
+  $('#deleteId').textContent = id;
+  deleteDialog.showModal();
+}
+
+async function doDelete() {
+  const id = parseInt($('#deleteId').textContent);
+  try {
+    await api(`/memory/${id}`, { method: 'DELETE' });
+    deleteDialog.close();
+    detailDialog.close();
+    loadMemories();
+  } catch (e) {
+    alert('删除失败: ' + e.message);
+  }
+}
+
+// ============================================================
+// Cleanup
+// ============================================================
+let cleanupStaleData = [];
+
+async function doCleanupPreview() {
+  const days = parseInt($('#cleanupDays').value) || 60;
+  const minAccess = $('#cleanupMinAccess').value ? parseInt($('#cleanupMinAccess').value) : undefined;
+
+  try {
+    const body = { stale_days: days, dry_run: true };
+    if (minAccess !== undefined) body.min_access_count = minAccess;
+    const res = await api('/cleanup', { method: 'POST', body: JSON.stringify(body) });
+
+    cleanupStaleData = res.memories || [];
+    $('#cleanupCount').textContent = res.count;
+    $('#cleanupTableBody').innerHTML = cleanupStaleData.map(m => `
+      <tr>
+        <td>${m.id}</td>
+        <td>${esc(m.summary || '(无)')}</td>
+        <td><span class="badge">${esc(m.category || '')}</span></td>
+        <td>${formatDate(m.last_accessed_at)}</td>
+      </tr>
+    `).join('') || '<tr><td colspan="4" class="empty-state">无过期记忆</td></tr>';
+    $('#cleanupPreview').style.display = 'block';
+  } catch (e) {
+    alert('预览失败: ' + e.message);
+  }
+}
+
+async function doCleanupConfirm() {
+  if (!cleanupStaleData.length) return;
+  const ids = cleanupStaleData.map(m => m.id);
+  try {
+    await api('/cleanup', {
+      method: 'POST',
+      body: JSON.stringify({ ids, dry_run: false }),
+    });
+    cleanupDialog.close();
+    loadMemories();
+  } catch (e) {
+    alert('清理失败: ' + e.message);
+  }
+}
+
+// ============================================================
+// Helpers
+// ============================================================
+function esc(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+function formatDate(iso) {
+  if (!iso) return '-';
+  try {
+    return new Date(iso).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+  } catch { return iso; }
+}
+
+// ============================================================
+// Event bindings
+// ============================================================
+$('#searchBtn').addEventListener('click', doSearch);
+$('#searchInput').addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
+$('#searchInput').addEventListener('input', e => { if (!e.target.value.trim()) loadMemories(); });
+
+$('#categoryFilter').addEventListener('change', () => { currentPage = 0; loadMemories(); });
+$('#sortSelect').addEventListener('change', () => { currentPage = 0; loadMemories(); });
+
+$('#prevBtn').addEventListener('click', () => { if (currentPage > 0) { currentPage--; loadMemories(); } });
+$('#nextBtn').addEventListener('click', () => { currentPage++; loadMemories(); });
+
+$('#newBtn').addEventListener('click', () => openEditDialog(null));
+$('#editForm').addEventListener('submit', handleSave);
+
+$('#detailEditBtn').addEventListener('click', async () => {
+  if (!currentDetailId) return;
+  detailDialog.close();
+  const m = await api(`/memory/${currentDetailId}`);
+  openEditDialog(m);
+});
+$('#detailDeleteBtn').addEventListener('click', () => {
+  if (!currentDetailId) return;
+  detailDialog.close();
+  confirmDelete(currentDetailId);
+});
+
+$('#memoryTableBody').addEventListener('click', e => {
+  const row = e.target.closest('tr[data-id]');
+  if (row) showDetail(parseInt(row.dataset.id));
+});
+
+$('#conflictList').addEventListener('click', e => {
+  const li = e.target.closest('li[data-id]');
+  if (li) handleConflictUpdate(parseInt(li.dataset.id));
+});
+$('#forceCreateBtn').addEventListener('click', handleForceCreate);
+
+$('#cleanupBtn').addEventListener('click', () => {
+  $('#cleanupPreview').style.display = 'none';
+  cleanupStaleData = [];
+  cleanupDialog.showModal();
+});
+$('#cleanupForm').addEventListener('submit', doCleanupPreview);
+$('#cleanupConfirmBtn').addEventListener('click', doCleanupConfirm);
+
+$('#deleteConfirmBtn').addEventListener('click', doDelete);
+
+// Initial load
+loadMemories();
+</script>
+</body>
+</html>
